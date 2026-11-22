@@ -1,0 +1,30 @@
+{
+ "title": "自分の場面を Drive に描く（例）",
+ "blender": "5.1.2",
+ "drive_dir": "colab_render",
+ "bundle": "my_scene.zip",
+ "workdir": "my_scene",
+ "engine": "eevee",
+ "command": "-b --factory-startup scene.blend -P {GPU} -o {OUT}/f_#### -s {START} -e {END} -a",
+ "frames": [
+  1,
+  1200
+ ],
+ "chunk": 200,
+ "out": "my_scene",
+ "expect_per_frame": 1,
+ "timeout_per_frame": 300,
+ "accept_gpus": [
+  "L4",
+  "T4",
+  "RTX PRO 6000"
+ ],
+ "release_at_end": true,
+ "env": {},
+ "video": {
+  "pattern": "f_%04d.png",
+  "fps": 60,
+  "name": "my_scene.mp4"
+ },
+ "note": "zip（中に my_scene/scene.blend）を マイドライブ/colab_render/ に置いてから実行する。"
+}

@@ -1,0 +1,26 @@
+{
+ "title": "見本の場面を EEVEE で Drive に描く（colab-render の試し）",
+ "blender": "5.1.2",
+ "drive_dir": "colab_render",
+ "build": "../scripts/demo_scene.py",
+ "build_args": "--out demo.blend --engine eevee --frames 120 --fps 30",
+ "engine": "eevee",
+ "command": "-b --factory-startup demo.blend -P {GPU} -o {OUT}/f_#### -s {START} -e {END} -a",
+ "frames": [
+  1,
+  120
+ ],
+ "chunk": 60,
+ "out": "demo_eevee",
+ "expect_per_frame": 1,
+ "timeout_per_frame": 300,
+ "accept_gpus": [],
+ "release_at_end": true,
+ "env": {},
+ "video": {
+  "pattern": "f_%04d.png",
+  "fps": 30,
+  "name": "demo_eevee.mp4"
+ },
+ "note": "猿の頭 100 体の見本の場面（ノートブックの中でコードで組み立てる）を EEVEE で 120 コマ描いて、4 秒の MP4 にします。Drive の許可のほかに、用意する物はありません。"
+}
