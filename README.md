@@ -16,8 +16,8 @@ Blender の描画（EEVEE・Cycles）を Google Colab の GPU に出して、Goo
 
 **Claude Code × Claude Opus 5.5（MAX）** で作りました。
 
-Mac（M5）で何時間もかかる Blender の描画を、Google Colab の NVIDIA の GPU（L4 など）に出すための道具です。区切りごとに描いて Google Drive に書き出し、途中で切れても続きから描き、描き終えたら MP4 を作って、ランタイムを自分で手放します。Claude Code のスキルとして入れると、「この場面を Colab で描いて」と頼むだけで、場面の確かめ・zip づくり・ノートブックの用意までを Claude が進めます。
-上の映像は、見本の場面（`scripts/demo_scene.py`）を描いたものです。見本のノートブックは、この場面をノートブックの中で組み立てて 120 コマ描き、4 秒の MP4 にします。Drive へのアクセスを許可するだけで、仕組みを通しで試せます。
+Mac で何時間もかかる Blender の描画を、Google Colab の NVIDIA の GPU（L4 など）に出すための道具です。区切りごとに描いて Google Drive に書き出し、途中で切れても続きから描き、描き終えたら MP4 を作って、ランタイムを自分で手放します。Claude Code のスキルとして入れると、「この場面を Colab で描いて」と頼むだけで、場面の確かめ・zip づくり・ノートブックの用意までを Claude が進めます。
+上の映像は、見本の場面（`scripts/demo_scene.py`）を描いたものです。見本のノートブックは、この場面をノートブックの中で組み立てて 120 コマ描き、4 秒の MP4 にします。Colab で開いて「すべてのセルを実行」を押し、Drive へのアクセスを許可するだけで、仕組みを通しで試せます（手順は下の「見本を試す」）。
 
 ## 結果：M5 の Mac と比べて
 
@@ -28,9 +28,9 @@ Mac（M5）で何時間もかかる Blender の描画を、Google Colab の NVID
 - **いちばん速く、1 コマあたりいちばん安いのは L4** でした。Cycles で Mac の 1.40〜1.75 倍、1 時間 1.94 ユニットです。
 - **EEVEE は、アニメとして続けて描くと L4 で 1 コマ 2.42 秒**（Blender の立ち上げ込み）になり、Mac の 2.2 倍でした。Mac は続けて描いても変わりません（5.40 秒）。続けて描く形が効くのは Colab の側です。
 - **ただし、速さは場面で変わります。** ここまでの数字は、毛があって GPU の仕事が重い場面のものです。毛のない軽い見本の場面を EEVEE で描くと、L4 は 1 コマ 2.11 秒、Mac は 2.16 秒で、ほぼ同じでした。GPU の仕事が重い場面ほど、L4 の差が出ます。
-- **T4** は Mac より遅く（Cycles で 0.7 倍）、**A100** は L4 より遅いうえ、ユニットは 4 倍ほど使います。G4（RTX PRO 6000）は混んでいて取れませんでした。
+- **T4** は Mac より遅く（Cycles で 0.7 倍）、**A100** は L4 より遅いうえ、ユニットは 4 倍ほど使います。G4（RTX PRO 6000）は、選んでも割り当てが進まず、A100 に回されました（プレミアム GPU は Pro+ が優先です）。
 - **絵は Mac とほぼ同じ**です（色の差の平均は EEVEE で 0.04/255、Cycles で 0.5/255）。
-- 200 ユニット（作者が契約した Colab Pro の枠）あれば、L4 を 100 時間ほど回せます（準備の時間を含めて）。夜通しの描画を、手元の PC にさせずに済みます。
+- 毎月 200 ユニット（作者が契約した Google AI Pro に付く Colab の特典。Colab Pro だけなら毎月 100）あれば、L4 を 100 時間ほど回せます（準備の時間を含めて）。夜通しの描画を、手元の PC にさせずに済みます。
 
 測った場面は作者の作例（毛のあるぬいぐるみが雨の窓辺で踊る、Cycles で作った場面。1920×1080）で、場面そのものはこのリポジトリに入っていません。数字のくわしい表は [references/gpu-table.md](references/gpu-table.md) にあります（2026 年 11 月の値。1 時間あたりのユニットは、Colab の画面に出た値とネットの報告です）。
 
@@ -69,7 +69,7 @@ Mac（M5）で何時間もかかる Blender の描画を、Google Colab の NVID
 git clone https://github.com/tanuu5/claude-colab-render.git ~/.claude/skills/colab-render
 ```
 
-「この場面を Colab で描いて」「描画を Mac と分けて描きたい」などと頼むと、Claude が SKILL.md の手順で、見積もり（時間とユニット）・場面の確かめ・zip・ノートブックを用意します。Colab の操作（ノートブックを開く、GPU を選ぶ、Drive の許可）は人がします。
+「この場面を Colab で描いて」「描画を Mac と分けて描きたい」などと頼むと、Claude が SKILL.md の手順で、見積もり（時間とユニット）・場面の確かめ・zip・ノートブックを用意します。人がするのは、zip を Drive に置くことと、Colab の操作（ノートブックを開く、GPU を選ぶ、Drive の許可）です。
 
 ## 実際の出力（Colab の L4 で、EEVEE を 120 コマ）
 
@@ -84,7 +84,7 @@ VIDEO written /content/drive/MyDrive/colab_render/out/nui_test_eevee/nui_test_ee
 
 ## 必要なもの
 
-- **Google Colab**（GPU のランタイム）。コンピューティング ユニットを使うので、Colab Pro などの有料の枠があると安心です。
+- **Google Colab**（GPU のランタイム）。コンピューティング ユニットを使うので、Colab Pro や、Google AI Pro に付く Colab の特典などの有料の枠があると安心です。
 - **Google Drive**：描いたコマと MP4 の置き場です。1080p の PNG は 1 枚 2〜3MB なので、数千コマなら数 GB〜20GB ほど要ります。
 - Blender（Linux 版）と NVIDIA の部品は、ノートブックが公式の配布元から自動で取ってきます。
 - 手元で道具を使うなら：Python 3（標準のライブラリだけ）、Blender（`blend_check.py`・`demo_scene.py`・手元での試し描き）、ffmpeg（手元で MP4 を作るとき）。
