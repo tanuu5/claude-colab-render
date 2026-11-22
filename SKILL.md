@@ -5,6 +5,8 @@ description: Blender の描画（EEVEE・Cycles の連番）を、Google Colab �
 
 # colab-render：Blender の描画を Colab の GPU に出す
 
+公開版：https://github.com/tanuu5/claude-colab-render （GPL-3.0-or-later。見本のノートブックは、そこから「Open in Colab」で開ける）
+
 Mac（M5）で何時間もかかる Blender の描画を、Google Colab の NVIDIA の GPU に出す。
 
 - 1 台で Mac より大きく速くなる GPU は少ない（いちばん良い L4 で、Cycles が 1.4〜1.75 倍、EEVEE を続けて描けば 2.2 倍）。
