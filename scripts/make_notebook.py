@@ -6,7 +6,8 @@ gpu_pick.py, colab_job.py and the job are written into the notebook, so the note
 
     python3 make_notebook.py job.json --out render_job.ipynb
 
-job.json: colab_job.py's fields (command, frames, chunk, engine, expect_per_frame, timeout_per_frame, env) and:
+job.json: colab_job.py's fields (command, frames, chunk, engine, expect_per_frame, timeout_per_frame, env, workers,
+ram_limit, echo) and:
     title          shown at the top             blender   version to install (default 5.1.2)
     drive_dir      folder in My Drive (default colab_render)   bundle   the zip in it   workdir  folder in the zip
     build          instead of a bundle: a Blender script (path from the job file) that makes the scene on Colab;
@@ -53,6 +54,8 @@ def notebook(job, base):
     n_chunks = -(-(last - first + 1) // int(job.get("chunk", 100)))
     accept = "、".join(job.get("accept_gpus") or []) or "どれでも"
     v = job.get("video")
+    workers = max(1, int(job.get("workers", 1)))
+    side = f"、Blender を {workers} 個並べて" if workers > 1 else ""
     video_row = (f"描き終えたら、書き出し先に `{v.get('name') or job['out'] + '.mp4'}` を作る（{v.get('fps', 60)}fps）"
                  if v else "作らない（連番だけ）")
     head = f"""
@@ -63,7 +66,7 @@ Colab の GPU で描いて、Google Drive に書き出すノートブック（co
 | | |
 |---|---|
 | 場面一式 | {scene_row} |
-| 描くコマ | {first}〜{last}（{last - first + 1} コマを、{job.get('chunk', 100)} コマずつ {n_chunks} 回に分けて） |
+| 描くコマ | {first}〜{last}（{last - first + 1} コマを、{job.get('chunk', 100)} コマずつ {n_chunks} 回に分けて{side}） |
 | 書き出し先 | マイドライブ / `{job['drive_dir']}` / `out` / `{job['out']}` |
 | 動画 | {video_row} |
 | 使う GPU | {accept} |

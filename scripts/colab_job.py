@@ -18,6 +18,16 @@ job.json (an example: assets/job_example.json):
     expect_per_frame   files a frame writes under {OUT} (default 1; 0 = do not count)
     timeout_per_frame  seconds (default 300; a chunk gets 600 + frames x this)
     env        extra environment variables for Blender (values may use {ROOT})
+    workers    Blenders that render at the same time, each a chunk of its own (default 1).  For a scene whose frames
+               wait on the CPU (heavy scene evaluation, Python that places things every frame) rather than on the
+               GPU: one GPU then feeds several Blenders.  Each needs its own share of the GPU's and the machine's
+               memory; the summary's gpu_util_mean, gpu_mem_peak_mb, ram_peak_gb and load_mean tell whether there is
+               room (too many for the machine's memory and Colab ends the runtime without a word)
+    ram_limit  (with workers > 1; default 0.85) the share of the machine's memory in use at which the youngest
+               Blender is ended and the job goes on with one Blender fewer; its chunk is rendered again when there
+               is room, and it does not count as a failed try.  Linux only (/proc/meminfo)
+    echo       (optional) a regular expression: the lines of a finished chunk's log that match it are printed
+               (the last 8), e.g. the render script's own timing lines
     build_args (with --build-script) the arguments of the script that makes the scene in ROOT before the first
                chunk (for a scene made by code instead of a bundle; values may use {ROOT})
     video      (optional) make an MP4 of the frames once every chunk is done, with ffmpeg:
@@ -30,7 +40,8 @@ job.json (an example: assets/job_example.json):
     python3 colab_job.py --job job.json --root BUNDLE_DIR --out OUT_DIR --video-only    (the MP4 of what is there)
 
 State lives in OUT_DIR/_colab_render/: done_<first>_<last> for each finished chunk (it is skipped next time),
-progress.txt (one line per chunk, with the time left), logs/<first>_<last>.log, summary.json.
+progress.txt (one line per chunk, with the time left), logs/<first>_<last>.log, summary.json, watch.txt (a line a
+minute while chunks render: load, memory in use, the GPU's utilisation and memory).
 Exit 0 when every chunk is done (and the MP4, if asked for, is made), 1 when a chunk failed twice or the MP4 could
 not be made, 2 when the GPU check failed.
 """
@@ -43,7 +54,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 EEVEE_PROBE = ("import bpy, gpu; sc = bpy.context.scene; sc.render.engine = 'BLENDER_EEVEE'; "
                "sc.render.resolution_percentage = 10; sc.eevee.taa_render_samples = 1; "
@@ -99,7 +112,8 @@ def files_under(folder):
     return [os.path.join(d, f) for d, _, fs in os.walk(folder) for f in fs]
 
 
-def run_chunk(a, job, s, e, work, log):
+def run_chunk(a, job, s, e, work, log, running=None):
+    """running: a dict that holds (the Blender's process, when it started) under (s, e) while it runs."""
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
     fill = {"GPU": a.gpu_pick, "START": s, "END": e, "OUT": work, "ROOT": a.root}
@@ -111,10 +125,18 @@ def run_chunk(a, job, s, e, work, log):
     with open(log, "w", encoding="utf-8") as fh:
         fh.write("$ " + shlex.join(cmd) + "\n")
         fh.flush()
+        proc = subprocess.Popen(cmd, cwd=a.root, env=env, stdout=fh, stderr=subprocess.STDOUT)
+        if running is not None:
+            running[(s, e)] = (proc, t0)
         try:
-            rc = subprocess.run(cmd, cwd=a.root, env=env, stdout=fh, stderr=subprocess.STDOUT, timeout=limit).returncode
+            rc = proc.wait(timeout=limit)
         except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
             rc = f"timeout after {limit} s"
+        finally:
+            if running is not None:
+                running.pop((s, e), None)
     secs = time.time() - t0
     made = files_under(work)
     want = (e - s + 1) * int(job.get("expect_per_frame", 1))
@@ -129,6 +151,72 @@ def run_chunk(a, job, s, e, work, log):
 def tail(path, n=25):
     with open(path, encoding="utf-8", errors="replace") as fh:
         return "".join(fh.readlines()[-n:])
+
+
+def echo(path, pattern, n=8):
+    """The last lines of a chunk's log that match the job's "echo"."""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return [l.rstrip() for l in fh if re.search(pattern, l)][-n:]
+
+
+def ram_used():
+    """(GB in use, GB in all) from /proc/meminfo (Linux); None elsewhere."""
+    try:
+        kb = {}
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                k, v = line.split(":", 1)
+                kb[k] = float(v.split()[0])
+        return (kb["MemTotal"] - kb["MemAvailable"]) / 1e6, kb["MemTotal"] / 1e6
+    except (OSError, KeyError, ValueError, IndexError):
+        return None
+
+
+def watch(done, got, every=10.0, trace=None, on_ram=None):
+    """While the chunks render: how busy the machine and the GPU are (the load average, the machine's memory in use;
+    with nvidia-smi the GPU's utilisation and memory).  It tells a scene that waits on the CPU from one that waits on
+    the GPU, and whether another Blender would fit.  trace: a file that gets a line every minute (in OUT_DIR, so that
+    after a runtime that died there is something to read: what was in use shortly before).  on_ram(GB in use, GB in
+    all): called with every reading of the memory (main()'s guard)."""
+    smi = shutil.which("nvidia-smi")
+    k = 0
+    while not done.wait(every):
+        k += 1
+        line = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            load = os.getloadavg()[0]
+            got["load"] += load
+            got["n"] += 1
+            line += f" load {load:.1f}"
+        except OSError:
+            pass
+        r = ram_used()
+        if r:
+            got["ram"] = max(got.get("ram", 0.0), r[0])
+            got["ram_total"] = r[1]
+            line += f" ram {r[0]:.1f}/{r[1]:.1f} GB"
+            if on_ram:
+                try:
+                    on_ram(*r)
+                except Exception as ex:                      # the watcher must outlive its guard
+                    print(f"(memory guard: {ex})", flush=True)
+        if smi:
+            try:
+                out = subprocess.run([smi, "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
+                                     capture_output=True, text=True, timeout=20).stdout
+                u, m = [float(x) for x in out.splitlines()[0].split(",")]
+                got["gpu_n"] += 1
+                got["util"] += u
+                got["mem"] = max(got["mem"], m)
+                line += f" gpu {u:.0f}% {m:.0f} MB"
+            except Exception:
+                pass
+        if trace and k % max(1, round(60 / every)) == 0:
+            try:
+                with open(trace, "a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+            except OSError:
+                pass
 
 
 def make_video(a, job, progress):
@@ -214,62 +302,167 @@ def main():
         said = [l for l in lines if re.search(r"\bsaved\b", l, re.I)]
         say(f"BUILD done: {(said or lines or [''])[-1].strip()}", progress)
     todo = chunks(job)
+    workers = max(1, int(job.get("workers", 1)))
     left = sum(e - s + 1 for s, e in todo if not os.path.exists(os.path.join(state, f"done_{s}_{e}")))
     say(f"START {job.get('title', '')}: frames {job['frames'][0]}-{job['frames'][1]} in {len(todo)} chunk(s); "
-        f"{left} frame(s) to render", progress)
-    t_run, f_run, skipped, device = 0.0, 0, 0, ""
-    for s, e in todo:
-        mark = os.path.join(state, f"done_{s}_{e}")
-        if os.path.exists(mark):
-            skipped += 1
-            say(f"skip {s}-{e} (done before)")
-            continue
+        f"{left} frame(s) to render" + (f", {workers} Blenders at a time" if workers > 1 else ""), progress)
+    st = {"t": 0.0, "f": 0, "left": left, "device": "", "fail": "", "shed": 0}
+    lock = threading.Lock()
+    t_wall = time.time()
+    got = {"n": 0, "load": 0.0, "gpu_n": 0, "util": 0.0, "mem": 0.0}
+    running, shed = {}, set()
+    slots = {"max": workers, "busy": 0, "quiet": 0.0}
+    room = threading.Condition()
+    ram_limit = float(job.get("ram_limit", 0.85))
+
+    def guard(used, total):
+        """The machine's memory is nearly full while several Blenders run: end the youngest one and go on with one
+        Blender fewer (its chunk is rendered again when there is room).  Colab ends a runtime whose memory is full
+        without a word, and everything in flight is lost."""
+        if used < ram_limit * total or time.time() < slots["quiet"]:
+            return
+        with room:
+            now = list(running.items())
+            if len(now) < 2:
+                return
+            key, (proc, _) = max(now, key=lambda kv: kv[1][1])
+            shed.add(key)
+            slots["max"] = max(1, len(now) - 1)
+            slots["quiet"] = time.time() + 60
+            st["shed"] += 1
+            proc.kill()
+        with lock:
+            say(f"MEMORY {used:.1f} of {total:.1f} GB in use with {len(now)} Blenders: ended {key[0]}-{key[1]} "
+                f"(it is rendered again later), {slots['max']} at a time from here", progress)
+
+    over = threading.Event()
+    threading.Thread(target=watch, args=(over, got),
+                     kwargs={"trace": os.path.join(state, "watch.txt"), "on_ram": guard}, daemon=True).start()
+
+    def extra():
+        x = {}
+        if workers > 1:
+            x.update(workers=workers, wall_seconds=round(time.time() - t_wall, 1),
+                     s_per_frame_each=round(st["t"] / st["f"], 2) if st["f"] else None)
+        if got["n"]:
+            x["load_mean"] = round(got["load"] / got["n"], 1)
+        if got["gpu_n"]:
+            x.update(gpu_util_mean=round(got["util"] / got["gpu_n"]), gpu_mem_peak_mb=round(got["mem"]))
+        if got.get("ram"):
+            x.update(ram_peak_gb=round(got["ram"], 1), ram_total_gb=round(got["ram_total"], 1))
+        if st["shed"]:
+            x.update(memory_guard=st["shed"], workers_at_end=slots["max"])
+        return x
+
+    def one(s, e):
+        """Render a chunk (twice if the first try fails), copy what it wrote to OUT_DIR, mark it done."""
+        if st["fail"]:
+            return
+        wdir = work if workers == 1 else os.path.join(work, f"{s}_{e}")
         log = os.path.join(logdir, f"{s}_{e}.log")
-        for attempt in (1, 2):
-            made, secs, problem = run_chunk(a, job, s, e, work, log)
+        attempt = 0
+        while True:
+            with room:                                   # a place among the Blenders (the guard may have taken one away)
+                while slots["busy"] >= slots["max"]:
+                    room.wait()
+                slots["busy"] += 1
+            try:
+                if st["fail"]:
+                    return
+                made, secs, problem = run_chunk(a, job, s, e, wdir, log, running)
+            finally:
+                with room:
+                    slots["busy"] -= 1
+                    room.notify_all()
             shutil.copyfile(log, os.path.join(state, "logs", f"{s}_{e}.log"))
+            if (s, e) in shed:
+                shed.discard((s, e))
+                if problem:                              # ended by the guard: not a failed try
+                    continue
+            attempt += 1
             if not problem:
                 break
-            say(f"FAIL {s}-{e} (try {attempt}): {problem}", progress)
-            print(tail(log), flush=True)
+            with lock:
+                say(f"FAIL {s}-{e} (try {attempt}): {problem}", progress)
+                print(tail(log), flush=True)
+            if attempt == 2:
+                break
         if problem:
-            summary(state, job, todo, skipped, t_run, f_run, device, "failed", f"{s}-{e}: {problem}")
-            sys.exit(1)
-        if not device:
-            if job.get("engine", "cycles") == "eevee":   # gpu_pick.py names the Cycles device; EEVEE draws with OpenGL
-                device = "OpenGL (EEVEE)"
-            else:
-                m = re.search(r"GPU_PICK device ([^\n]+)", open(log, encoding="utf-8", errors="replace").read())
-                device = m.group(1).strip() if m else ""
+            with lock:
+                st["fail"] = st["fail"] or f"{s}-{e}: {problem}"
+            return
         for f in made:
-            dest = os.path.join(a.out, os.path.relpath(f, work))
+            dest = os.path.join(a.out, os.path.relpath(f, wdir))
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             shutil.copyfile(f, dest)
-        with open(mark, "w", encoding="utf-8") as fh:
+        with open(os.path.join(state, f"done_{s}_{e}"), "w", encoding="utf-8") as fh:
             fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {secs:.1f} s {len(made)} file(s)\n")
-        n = e - s + 1
-        t_run, f_run, left = t_run + secs, f_run + n, left - n
-        rate = t_run / f_run
-        say(f"done {s}-{e}: {n} frame(s) in {hms(secs)} ({secs / n:.2f} s a frame with Blender's start), "
-            f"{left} left, about {hms(left * rate)} to go", progress)
-    say(f"ALL DONE: {f_run} frame(s) rendered now, {skipped} chunk(s) done before; "
-        f"{(t_run / f_run if f_run else 0):.2f} s a frame; output in {a.out}", progress)
+        with lock:
+            if not st["device"]:
+                if job.get("engine", "cycles") == "eevee":   # gpu_pick.py names the Cycles device; EEVEE draws with OpenGL
+                    st["device"] = "OpenGL (EEVEE)"
+                else:
+                    m = re.search(r"GPU_PICK device ([^\n]+)", open(log, encoding="utf-8", errors="replace").read())
+                    st["device"] = m.group(1).strip() if m else ""
+            n = e - s + 1
+            st["t"], st["f"], st["left"] = st["t"] + secs, st["f"] + n, st["left"] - n
+            rate = (time.time() - t_wall if workers > 1 else st["t"]) / st["f"]
+            say(f"done {s}-{e}: {n} frame(s) in {hms(secs)} ({secs / n:.2f} s a frame with Blender's start), "
+                f"{st['left']} left, about {hms(st['left'] * rate)} to go", progress)
+            if job.get("echo"):
+                for line in echo(log, job["echo"]):
+                    print("  | " + line, flush=True)
+
+    skipped, rest = 0, []
+    for s, e in todo:
+        if os.path.exists(os.path.join(state, f"done_{s}_{e}")):
+            skipped += 1
+            say(f"skip {s}-{e} (done before)")
+        else:
+            rest.append((s, e))
+    if workers == 1:
+        for s, e in rest:
+            one(s, e)
+            if st["fail"]:
+                break
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for r in [pool.submit(one, s, e) for s, e in rest]:
+                r.result()
+    over.set()
+    t_run, f_run, device = st["t"], st["f"], st["device"]
+    if st["fail"]:
+        summary(state, job, todo, skipped, t_run, f_run, device, "failed", st["fail"], extra=extra())
+        sys.exit(1)
+    if workers > 1:
+        wall = time.time() - t_wall
+        say(f"ALL DONE: {f_run} frame(s) rendered now, {skipped} chunk(s) done before; "
+            f"{(wall / f_run if f_run else 0):.2f} s a frame with {workers} Blenders at a time "
+            f"({(t_run / f_run if f_run else 0):.2f} s a frame in each); output in {a.out}", progress)
+    else:
+        say(f"ALL DONE: {f_run} frame(s) rendered now, {skipped} chunk(s) done before; "
+            f"{(t_run / f_run if f_run else 0):.2f} s a frame; output in {a.out}", progress)
     video, problem = make_video(a, job, progress)
     if problem:
         say(f"VIDEO not made: {problem}", progress)
     summary(state, job, todo, skipped, t_run, f_run, device, "failed" if problem else "done",
-            f"video: {problem}" if problem else "", video)
+            f"video: {problem}" if problem else "", video, extra=extra())
     if problem:
         sys.exit(1)
 
 
-def summary(state, job, todo, skipped, t_run, f_run, device, status, error, video=None):
+def summary(state, job, todo, skipped, t_run, f_run, device, status, error, video=None, extra=None):
+    """seconds_now and s_per_frame: of the Blenders' own times, one after another; with several workers of the
+    wall clock (extra["wall_seconds"]), and s_per_frame_each is what a frame took inside one Blender."""
+    extra = extra or {}
+    secs = extra.get("wall_seconds", t_run)
     with open(os.path.join(state, "summary.json"), "w", encoding="utf-8") as fh:
         json.dump({"title": job.get("title", ""), "status": status, "error": error,
                    "engine": job.get("engine", "cycles"), "frames": job["frames"],
                    "chunks": len(todo), "skipped_chunks": skipped, "frames_rendered_now": f_run,
-                   "seconds_now": round(t_run, 1), "s_per_frame": round(t_run / f_run, 2) if f_run else None,
-                   "device": device, "video": video, "finished": time.strftime("%Y-%m-%d %H:%M:%S")},
+                   "seconds_now": round(secs, 1), "s_per_frame": round(secs / f_run, 2) if f_run else None,
+                   "device": device, "video": video, "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
+                   **{k: v for k, v in extra.items() if k != "wall_seconds"}},
                   fh, ensure_ascii=False, indent=1)
 
 
