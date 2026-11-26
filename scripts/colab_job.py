@@ -9,7 +9,7 @@ it goes to Colab, or to render the Mac's share of a job).
     python3 colab_job.py --job job.json --blender BL --check [--gpu-pick gpu_pick.py]
         (--check only: can Cycles / EEVEE draw with the GPU here?  Exit 0 if the job's engine can)
 
-job.json (an example: assets/job_example.json):
+job.json (examples: assets/job_bundle_example.json, a scene in a zip; assets/job_demo_eevee.json, one made by code):
     command    Blender's arguments, with {GPU} (gpu_pick.py), {START} and {END} (the chunk's first and last frame),
                {OUT} (an empty folder for this chunk: everything written under it is copied to OUT_DIR, sub-folders
                kept) and {ROOT} (the bundle's folder; Blender runs there).  Write {{ and }} for a literal brace.
